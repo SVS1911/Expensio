@@ -24,6 +24,35 @@ For local development:
 
 Docker Desktop (Windows/macOS) or Docker Engine with Docker Compose (Linux) can run both SQL Server and the app without a separately installed SQL Server.
 
+## Commands at a glance
+
+Run these commands from the repository root. For Docker, configure `.env` first as described in [Quick start with Docker](#quick-start-with-docker):
+
+```sh
+docker compose up --build -d
+docker compose logs -f
+docker compose down
+```
+
+For local development, first configure `.env`, install/start SQL Server, and install the ODBC Driver as described below. Then install dependencies and start both the frontend and API:
+
+```sh
+npm ci
+python -m venv .venv
+python -m pip install -r requirements.txt
+npm run dev
+```
+
+On Windows PowerShell, activate the Python environment before installing Python dependencies:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+npm run dev
+```
+
+On macOS/Linux, activate it with `source .venv/bin/activate` before running the Python install command. Open `http://localhost:5173` after the development server starts. To build and verify changes, run `npm run build`, `python -m compileall -q server scripts tests`, and `python -m unittest discover -s tests -v`. Database migration commands are documented under [Migrating existing data](#migrating-existing-data).
+
 ## Quick start with Docker
 
 This is the simplest way to run the complete app and SQL Server together.
