@@ -3,15 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f0e6" />
+    <meta name="theme-color" content="#fff8d6" />
     <script>
       (() => {
-        const themes = ["ivory-charcoal", "beige-blue", "lime-orange", "bronze-pearl"];
+        const palettes = ["previous", "ivory-charcoal", "beige-blue", "lime-orange", "bronze-pearl", "ruby-seafoam", "yellow-sage"];
         try {
-          const theme = localStorage.getItem("expenseTrackerTheme");
-          document.documentElement.dataset.theme = themes.includes(theme) ? theme : themes[0];
+          const stored = localStorage.getItem("expenseTrackerTheme") || "";
+          const [storedPalette, storedMode] = stored.split(":");
+          const palette = palettes.includes(storedPalette)
+            ? storedPalette
+            : palettes.includes(stored) ? stored : "previous";
+          const mode = storedPalette === "dark" || stored === "dark" || storedMode === "dark" ? "dark" : "light";
+          document.documentElement.dataset.palette = palette;
+          document.documentElement.dataset.theme = mode;
         } catch {
-          document.documentElement.dataset.theme = themes[0];
+          document.documentElement.dataset.palette = "previous";
+          document.documentElement.dataset.theme = "light";
         }
       })();
     </script>

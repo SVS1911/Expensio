@@ -9,7 +9,7 @@ Expense Tracker is a personal and travel expense web app. The React/Vite fronten
 - Set cumulative spending limits for regular and travel expenses.
 - Add travel companions with a name, email, and optional PNG, JPEG, or WebP photo (up to 5 MB).
 - Select a companion to view their contact details and assigned expenses.
-- Choose from four saved color themes.
+- Choose from seven color palettes, each available in light or dark mode.
 - View in-app notifications and optionally email travel expense summaries.
 
 ## Requirements
@@ -186,7 +186,7 @@ The default SQLite source is `server/expense_tracker.db`. To choose another sour
 2. Add regular expenses on **Expenses** or travel expenses on **Travel**. A travel expense must be assigned to a saved companion.
 3. Add a travel companion's name and email and optionally a PNG, JPEG, or WebP photo no larger than 5 MB. Adding someone with an existing name updates that companion's email; a newly selected photo replaces their current photo.
 4. Select a companion or their row in **Spend by person** to open their contact and assigned expense details. Close the dialog with its close button, by clicking outside, or with `Esc`.
-5. Use the theme buttons in the lower-right corner to choose one of four palettes. The preference is saved in the current browser.
+5. On **Profile**, choose one of seven palettes and either light or dark mode. The selection applies across the app and is saved in the current browser. Palettes include the original violet, pink, and yellow colors, ivory and charcoal, muted yellow beige and royal blue, lime yellow and orange, bronze and pearl, deep ruby and seafoam, and yellow and sage.
 6. Set regular and travel spending limits on their overview pages. Limits apply to the cumulative total of saved expenses, not to an individual month.
 7. Edit your account on **Profile**. Deleting your profile requires confirmation and permanently removes that user's expenses, companions, spending limits, and notifications.
 

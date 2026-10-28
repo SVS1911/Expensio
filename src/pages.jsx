@@ -6,6 +6,7 @@ import ErrorMessage from "./components/ErrorMessage.jsx";
 import Header from "./components/Header.jsx";
 import HeroOrbit from "./components/HeroOrbit.jsx";
 import RecentList from "./components/RecentList.jsx";
+import ThemeSettings from "./components/ThemeToggle.jsx";
 
 const CATEGORIES = ["Academic", "Food", "Travel", "Shopping", "Bills", "Entertainment", "Other"];
 const money = (value) => `₹${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
@@ -522,6 +523,9 @@ export function ProfilePage({ user }) {
           <button className="primary-button profile-save" type="submit" disabled={saving}>{saving ? "Saving…" : "Save profile"}</button>
         </form>
       </section>
+      <div className="profile-panel">
+        <ThemeSettings />
+      </div>
       <section className="recent-section profile-panel delete-profile-panel">
         <h2>Delete profile</h2>
         <p className="card-note">Permanently delete your account and all of its expenses, travel companions, and notifications.</p>
