@@ -3,14 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#fff8d6" />
+    <meta name="theme-color" content="#f5f0e6" />
     <script>
       (() => {
+        const themes = ["ivory-charcoal", "beige-blue", "lime-orange", "bronze-pearl"];
         try {
           const theme = localStorage.getItem("expenseTrackerTheme");
-          document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+          document.documentElement.dataset.theme = themes.includes(theme) ? theme : themes[0];
         } catch {
-          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.theme = themes[0];
         }
       })();
     </script>

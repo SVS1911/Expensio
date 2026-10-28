@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
-import { api, jsonBody } from "./api.js";
+import { Link, useNavigate } from "react-router-dom";
+import { api, jsonBody, logout } from "./api.js";
 import BudgetEditor from "./components/BudgetEditor.jsx";
 import ErrorMessage from "./components/ErrorMessage.jsx";
 import Header from "./components/Header.jsx";
@@ -262,6 +262,8 @@ export function TravelDashboardPage({ user }) {
   const [limit, setLimit] = useState(null);
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
+  const [newImage, setNewImage] = useState(null);
+  const [selectedTraveler, setSelectedTraveler] = useState(null);
   const [sendingSummary, setSendingSummary] = useState(null);
   const [emailMessage, setEmailMessage] = useState("");
   const [error, setError] = useState("");
@@ -275,6 +277,14 @@ export function TravelDashboardPage({ user }) {
     } catch (err) { setError(err.message); }
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!selectedTraveler) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setSelectedTraveler(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedTraveler]);
 
   const total = expenses.reduce((sum, item) => sum + Number(item.amount), 0);
   const totalsByPerson = useMemo(() => {
@@ -285,13 +295,35 @@ export function TravelDashboardPage({ user }) {
 
   const addTraveler = async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     setError("");
     try {
-      await api("/travelers", { method: "POST", body: jsonBody({ name: newName.trim(), email: newEmail.trim() }) });
+      await api("/travelers", { method: "POST", body: jsonBody({ name: newName.trim(), email: newEmail.trim(), image: newImage }) });
       setNewName("");
       setNewEmail("");
+      setNewImage(null);
+      form.reset();
       await load();
     } catch (err) { setError(err.message); }
+  };
+  const selectTravelerPhoto = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setError("");
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setError("Choose a PNG, JPEG, or WebP photo.");
+      event.target.value = "";
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError("Traveler photos must be 5 MB or smaller.");
+      event.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setNewImage(String(reader.result));
+    reader.onerror = () => setError("Could not read that photo. Please try another file.");
+    reader.readAsDataURL(file);
   };
   const sendSummary = async (traveler) => {
     setSendingSummary(traveler.id);
@@ -338,9 +370,19 @@ export function TravelDashboardPage({ user }) {
             <input id="traveler-name" placeholder="Add a person's name" value={newName} onChange={(event) => setNewName(event.target.value)} required />
             <label className="visually-hidden" htmlFor="traveler-email">Traveler email</label>
             <input id="traveler-email" type="email" placeholder="Email address" value={newEmail} onChange={(event) => setNewEmail(event.target.value)} required />
+            <label className="traveler-photo-label" htmlFor="traveler-photo">{newImage ? "Photo selected" : "Choose photo"}</label>
+            <input id="traveler-photo" className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" onChange={selectTravelerPhoto} />
             <button className="primary-button" type="submit">Add / update person</button>
           </form>
-          <div className="traveler-list">{travelers.map((person) => <div className="traveler-chip" key={person.id}><span>{person.name} · {person.email}</span><button className="remove-traveler" type="button" onClick={() => removeTraveler(person.id)} aria-label={`Remove ${person.name}`}>Remove</button></div>)}</div>
+          <div className="traveler-list">{travelers.map((person) => <div className="traveler-chip" key={person.id}>
+            <button className="traveler-profile-button" type="button" onClick={() => setSelectedTraveler(person)}>
+              {person.image
+                ? <img className="traveler-avatar" src={person.image} alt="" />
+                : <span className="traveler-avatar traveler-avatar-placeholder">{person.name.charAt(0).toUpperCase()}</span>}
+              <span className="traveler-contact"><b>{person.name}</b><small>{person.email}</small></span>
+            </button>
+            <button className="remove-traveler" type="button" onClick={() => removeTraveler(person.id)} aria-label={`Remove ${person.name}`}>Remove</button>
+          </div>)}</div>
           {!travelers.length && <p className="empty-state">Add people traveling with you to begin.</p>}
         </article>
         <article className="recent-section person-dashboard">
@@ -348,7 +390,13 @@ export function TravelDashboardPage({ user }) {
           <div className="person-totals">{totalsByPerson.map((item) => {
             const person = travelers.find((traveler) => traveler.name.toLowerCase() === item.name.toLowerCase());
             return <div className="person-total-row" key={item.name}>
-              <span className="recent-icon">{item.name.charAt(0).toUpperCase()}</span><b>{item.name}</b><strong>{money(item.total)}</strong>
+              <button className="person-profile-button" type="button" onClick={() => person && setSelectedTraveler(person)} disabled={!person}>
+                {person?.image
+                  ? <img className="traveler-avatar" src={person.image} alt="" />
+                  : <span className="traveler-avatar traveler-avatar-placeholder">{item.name.charAt(0).toUpperCase()}</span>}
+                <b>{item.name}</b>
+              </button>
+              <strong>{money(item.total)}</strong>
               {person && <button className="text-button" type="button" onClick={() => sendSummary(person)} disabled={sendingSummary === person.id || item.total === 0}>
                 {sendingSummary === person.id ? "Sending…" : "Send email"}
               </button>}
@@ -359,11 +407,39 @@ export function TravelDashboardPage({ user }) {
         </article>
       </section>
       <RecentList title="Recent travel expenses" items={recent} empty="Your travel expenses will appear here." viewLink="/travel/expenses" travel />
+      {selectedTraveler && (() => {
+        const personExpenses = expenses.filter((item) => item.people?.toLowerCase() === selectedTraveler.name.toLowerCase())
+          .sort((a, b) => b.date.localeCompare(a.date));
+        const personTotal = personExpenses.reduce((sum, item) => sum + Number(item.amount), 0);
+        return <div className="traveler-modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setSelectedTraveler(null);
+        }}>
+          <section className="traveler-modal" role="dialog" aria-modal="true" aria-labelledby="traveler-modal-title" tabIndex="-1">
+            <button className="traveler-modal-close" type="button" onClick={() => setSelectedTraveler(null)} aria-label="Close traveler details">×</button>
+            <div className="traveler-modal-heading">
+              {selectedTraveler.image
+                ? <img className="traveler-modal-avatar" src={selectedTraveler.image} alt={`${selectedTraveler.name}`} />
+                : <span className="traveler-modal-avatar traveler-avatar-placeholder">{selectedTraveler.name.charAt(0).toUpperCase()}</span>}
+              <div><h2 id="traveler-modal-title">{selectedTraveler.name}</h2><p>{selectedTraveler.email}</p></div>
+            </div>
+            <div className="traveler-modal-total"><span>{personExpenses.length} travel expenses</span><strong>{money(personTotal)}</strong></div>
+            <h3>Expenses</h3>
+            <div className="traveler-modal-expenses">
+              {personExpenses.map((item) => <article className="traveler-expense-item" key={item.id}>
+                <div><b>{item.title}</b><small>{item.date}{item.description ? ` · ${item.description}` : ""}</small></div>
+                <strong>{money(item.amount)}</strong>
+              </article>)}
+              {!personExpenses.length && <p className="empty-state">No expenses have been recorded for this traveler yet.</p>}
+            </div>
+          </section>
+        </div>;
+      })()}
     </main>
   );
 }
 
 export function ProfilePage({ user }) {
+  const navigate = useNavigate();
   const [profile, setProfile] = useState({
     name: user.name || "",
     email: user.email || "",
@@ -374,6 +450,7 @@ export function ProfilePage({ user }) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -412,6 +489,18 @@ export function ProfilePage({ user }) {
       setSaving(false);
     }
   };
+  const deleteAccount = async () => {
+    if (!window.confirm("Delete your profile and all saved expenses, travelers, and notifications? This cannot be undone.")) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await api("/profile", { method: "DELETE" });
+      logout(navigate);
+    } catch (err) {
+      setError(err.message);
+      setDeleting(false);
+    }
+  };
 
   return (
     <main className="app">
@@ -432,6 +521,13 @@ export function ProfilePage({ user }) {
           {success && <p className="success-message" role="status">{success}</p>}
           <button className="primary-button profile-save" type="submit" disabled={saving}>{saving ? "Saving…" : "Save profile"}</button>
         </form>
+      </section>
+      <section className="recent-section profile-panel delete-profile-panel">
+        <h2>Delete profile</h2>
+        <p className="card-note">Permanently delete your account and all of its expenses, travel companions, and notifications.</p>
+        <button className="delete-profile-button" type="button" onClick={deleteAccount} disabled={deleting}>
+          {deleting ? "Deleting profile…" : "Delete my profile"}
+        </button>
       </section>
     </main>
   );

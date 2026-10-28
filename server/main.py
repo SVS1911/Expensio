@@ -1,7 +1,8 @@
 import os
 import re
 import bcrypt
-import sqlite3
+import base64
+import pyodbc
 from contextlib import contextmanager
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
@@ -27,9 +28,8 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
-DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "server/expense_tracker.db"))
-if not DATABASE_PATH.is_absolute():
-    DATABASE_PATH = Path(__file__).resolve().parents[1] / DATABASE_PATH
+SQLSERVER_CONNECTION_STRING = os.getenv("SQLSERVER_CONNECTION_STRING", "").strip()
+SQLSERVER_DATABASE = os.getenv("SQLSERVER_DATABASE", "ExpenseTracker").strip()
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"
 TOKEN_LIFETIME = timedelta(days=7)
@@ -64,8 +64,8 @@ async def validation_error(_request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=422, content={"error": "; ".join(messages)})
 
 
-@app.exception_handler(sqlite3.IntegrityError)
-async def database_conflict(_request: Request, _exc: sqlite3.IntegrityError):
+@app.exception_handler(pyodbc.IntegrityError)
+async def database_conflict(_request: Request, _exc: pyodbc.IntegrityError):
     return JSONResponse(status_code=409, content={"error": "That email address or record is already in use."})
 
 
@@ -101,6 +101,7 @@ class ExpenseUpdate(BaseModel):
 class TravelerInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(min_length=3, max_length=254)
+    image: str | None = Field(default=None, max_length=7_000_000)
 
 
 class SettingsInput(BaseModel):
@@ -120,24 +121,110 @@ def amount_in_cents(value):
     return int((Decimal(str(value)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
-class DatabaseConnection(sqlite3.Connection):
-    def execute(self, sql, parameters=(), /):
-        normalized = tuple(
+class QueryResult:
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.columns = [column[0] for column in cursor.description] if cursor.description else []
+        self.rowcount = cursor.rowcount
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        return dict(zip(self.columns, row)) if row is not None else None
+
+    def fetchall(self):
+        return [dict(zip(self.columns, row)) for row in self.cursor.fetchall()]
+
+
+class DatabaseConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    @staticmethod
+    def _sql_server_sql(sql):
+        returning = re.search(r"\s+RETURNING\s+(.+?)\s*;?\s*$", sql, re.IGNORECASE | re.DOTALL)
+        if returning:
+            output_columns = ", ".join(
+                f"inserted.{column.strip().split(' AS ')[0].split(' as ')[0]}"
+                + (f" AS {column.strip().split(' AS ', 1)[1]}" if " AS " in column else
+                   f" AS {column.strip().split(' as ', 1)[1]}" if " as " in column else "")
+                for column in returning.group(1).rstrip(";").split(",")
+            )
+            sql = sql[:returning.start()]
+            if sql.lstrip().upper().startswith("INSERT"):
+                sql = re.sub(r"\)\s*VALUES\b", f") OUTPUT {output_columns} VALUES", sql, count=1, flags=re.IGNORECASE)
+            else:
+                sql = re.sub(r"\s+WHERE\b", f" OUTPUT {output_columns} WHERE", sql, count=1, flags=re.IGNORECASE)
+        sql = re.sub(
+            r"\bSELECT\b(.*?)\bLIMIT\s+(\d+)\b",
+            lambda match: f"SELECT TOP {match.group(2)}{match.group(1)}",
+            sql,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        sql = re.sub(r"\bFALSE\b", "0", sql, flags=re.IGNORECASE)
+        sql = re.sub(r"\bTRUE\b", "1", sql, flags=re.IGNORECASE)
+        return sql.rstrip().replace("%s", "?")
+
+    def execute(self, sql, parameters=()):
+        cursor = self.connection.cursor()
+        cursor.execute(self._sql_server_sql(sql), tuple(
             str(value) if isinstance(value, UUID)
             else value.isoformat() if isinstance(value, (Date, datetime))
             else float(value) if isinstance(value, Decimal)
             else value
             for value in parameters
+        ))
+        return QueryResult(cursor)
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
+def connection_string_for_database(database_name):
+    parts = [part for part in SQLSERVER_CONNECTION_STRING.split(";") if part]
+    replaced = False
+    for index, part in enumerate(parts):
+        if part.split("=", 1)[0].strip().lower() in {"database", "initial catalog"}:
+            parts[index] = f"Database={database_name}"
+            replaced = True
+    if not replaced:
+        parts.append(f"Database={database_name}")
+    return ";".join(parts)
+
+
+def ensure_database():
+    if not SQLSERVER_CONNECTION_STRING:
+        raise RuntimeError("SQLSERVER_CONNECTION_STRING must be set to connect to SQL Server.")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", SQLSERVER_DATABASE):
+        raise RuntimeError("SQLSERVER_DATABASE may contain only letters, numbers, and underscores.")
+    master_connection_string = connection_string_for_database("master")
+    connection = pyodbc.connect(master_connection_string, autocommit=True, timeout=5)
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            "IF DB_ID(?) IS NULL BEGIN DECLARE @sql NVARCHAR(300) = N'CREATE DATABASE ' + QUOTENAME(?); EXEC(@sql); END",
+            SQLSERVER_DATABASE,
+            SQLSERVER_DATABASE,
         )
-        return super().execute(sql.replace("%s", "?"), normalized)
+    finally:
+        connection.close()
 
 
 @contextmanager
 def database():
-    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DATABASE_PATH, factory=DatabaseConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    if not SQLSERVER_CONNECTION_STRING:
+        raise RuntimeError("SQLSERVER_CONNECTION_STRING must be set to connect to SQL Server.")
+    connection = DatabaseConnection(pyodbc.connect(
+        connection_string_for_database(SQLSERVER_DATABASE),
+        autocommit=False,
+        timeout=5,
+    ))
     try:
         yield connection
         connection.commit()
@@ -150,62 +237,51 @@ def database():
 
 def create_schema():
     with database() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                email_notifications INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique ON users (lower(email));
-            CREATE TABLE IF NOT EXISTS expenses (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                title TEXT NOT NULL,
-                amount REAL NOT NULL CHECK (amount > 0),
-                category TEXT NOT NULL,
-                expense_date TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                expense_type TEXT NOT NULL DEFAULT 'regular' CHECK (expense_type IN ('regular', 'travel')),
-                people TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS expenses_user_date_idx ON expenses (user_id, expense_date DESC);
-            CREATE TABLE IF NOT EXISTS travelers (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS travelers_user_name_unique ON travelers (user_id, lower(name));
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-                expense_limit REAL,
-                travel_limit REAL
-            );
-            CREATE TABLE IF NOT EXISTS notifications (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL,
-                title TEXT NOT NULL,
-                message TEXT NOT NULL,
-                email_status TEXT NOT NULL DEFAULT 'not_sent',
-                is_read INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS notifications_user_date_idx ON notifications (user_id, created_at DESC);
-            """
-        )
-        traveler_columns = {row["name"] for row in connection.execute("PRAGMA table_info(travelers)")}
-        if "email" not in traveler_columns:
-            connection.execute("ALTER TABLE travelers ADD COLUMN email TEXT NOT NULL DEFAULT ''")
-        user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
-        if "email_notifications" not in user_columns:
-            connection.execute("ALTER TABLE users ADD COLUMN email_notifications INTEGER NOT NULL DEFAULT 1")
+        statements = [
+            """IF OBJECT_ID(N'users', N'U') IS NULL CREATE TABLE users (
+                id NVARCHAR(36) NOT NULL PRIMARY KEY, name NVARCHAR(100) NOT NULL,
+                email NVARCHAR(254) NOT NULL, password_hash NVARCHAR(255) NOT NULL,
+                email_notifications BIT NOT NULL CONSTRAINT users_email_notifications_default DEFAULT 1,
+                created_at DATETIME2 NOT NULL CONSTRAINT users_created_at_default DEFAULT SYSUTCDATETIME())""",
+            """IF OBJECT_ID(N'expenses', N'U') IS NULL CREATE TABLE expenses (
+                id NVARCHAR(36) NOT NULL PRIMARY KEY,
+                user_id NVARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title NVARCHAR(160) NOT NULL, amount DECIMAL(12,2) NOT NULL CHECK (amount > 0),
+                category NVARCHAR(32) NOT NULL, expense_date DATE NOT NULL,
+                description NVARCHAR(1000) NOT NULL CONSTRAINT expenses_description_default DEFAULT '',
+                expense_type NVARCHAR(16) NOT NULL CONSTRAINT expenses_type_default DEFAULT 'regular'
+                    CHECK (expense_type IN ('regular', 'travel')),
+                people NVARCHAR(100) NULL, created_at DATETIME2 NOT NULL CONSTRAINT expenses_created_at_default DEFAULT SYSUTCDATETIME())""",
+            """IF OBJECT_ID(N'travelers', N'U') IS NULL CREATE TABLE travelers (
+                id NVARCHAR(36) NOT NULL PRIMARY KEY,
+                user_id NVARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name NVARCHAR(100) NOT NULL, email NVARCHAR(254) NOT NULL CONSTRAINT travelers_email_default DEFAULT '',
+                image_data NVARCHAR(MAX) NULL,
+                created_at DATETIME2 NOT NULL CONSTRAINT travelers_created_at_default DEFAULT SYSUTCDATETIME())""",
+            """IF OBJECT_ID(N'user_settings', N'U') IS NULL CREATE TABLE user_settings (
+                user_id NVARCHAR(36) NOT NULL PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                expense_limit DECIMAL(12,2) NULL, travel_limit DECIMAL(12,2) NULL)""",
+            """IF OBJECT_ID(N'notifications', N'U') IS NULL CREATE TABLE notifications (
+                id NVARCHAR(36) NOT NULL PRIMARY KEY,
+                user_id NVARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind NVARCHAR(60) NOT NULL, title NVARCHAR(160) NOT NULL, message NVARCHAR(1000) NOT NULL,
+                email_status NVARCHAR(32) NOT NULL CONSTRAINT notifications_email_status_default DEFAULT 'not_sent',
+                is_read BIT NOT NULL CONSTRAINT notifications_is_read_default DEFAULT 0,
+                created_at DATETIME2 NOT NULL CONSTRAINT notifications_created_at_default DEFAULT SYSUTCDATETIME())""",
+            """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'users_email_lower_unique')
+                CREATE UNIQUE INDEX users_email_lower_unique ON users(email)""",
+            """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'expenses_user_date_idx')
+                CREATE INDEX expenses_user_date_idx ON expenses(user_id, expense_date DESC)""",
+            """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'travelers_user_name_unique')
+                CREATE UNIQUE INDEX travelers_user_name_unique ON travelers(user_id, name)""",
+            """IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'notifications_user_date_idx')
+                CREATE INDEX notifications_user_date_idx ON notifications(user_id, created_at DESC)""",
+            "IF COL_LENGTH('travelers', 'email') IS NULL ALTER TABLE travelers ADD email NVARCHAR(254) NOT NULL CONSTRAINT travelers_email_migration_default DEFAULT ''",
+            "IF COL_LENGTH('travelers', 'image_data') IS NULL ALTER TABLE travelers ADD image_data NVARCHAR(MAX) NULL",
+            "IF COL_LENGTH('users', 'email_notifications') IS NULL ALTER TABLE users ADD email_notifications BIT NOT NULL CONSTRAINT users_email_notifications_migration_default DEFAULT 1",
+        ]
+        for statement in statements:
+            connection.execute(statement)
         connection.execute("UPDATE notifications SET email_status = 'not_sent' WHERE email_status = 'pending'")
 
 
@@ -213,6 +289,7 @@ def create_schema():
 def startup():
     if not JWT_SECRET or len(JWT_SECRET) < 32:
         raise RuntimeError("JWT_SECRET must be set to a random value with at least 32 characters.")
+    ensure_database()
     create_schema()
 
 
@@ -361,8 +438,8 @@ def register(payload: RegistrationInput):
                 """,
                 (uuid4(), name, email, PASSWORD_HASHER.hash(payload.password)),
             ).fetchone()
-    except sqlite3.IntegrityError as error:
-        if "users.email" not in str(error) and "UNIQUE constraint failed" not in str(error):
+    except pyodbc.IntegrityError as error:
+        if "users_email_lower_unique" not in str(error) and "duplicate key" not in str(error).lower():
             raise
         raise HTTPException(409, "Email already registered.")
     return session_for(user)
@@ -431,6 +508,14 @@ def update_profile(payload: ProfileInput, user_id: UserId):
                 (name, email, payload.emailNotifications, user_id),
             ).fetchone()
     return public_user(row)
+
+
+@app.delete("/api/profile", status_code=204)
+def delete_profile(user_id: UserId):
+    with database() as connection:
+        result = connection.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        if result.rowcount == 0:
+            raise HTTPException(404, "Profile not found.")
 
 
 @app.get("/api/expenses")
@@ -571,8 +656,23 @@ def delete_expense(expense_id: UUID, user_id: UserId):
 @app.get("/api/travelers")
 def get_travelers(user_id: UserId):
     with database() as connection:
-        rows = connection.execute("SELECT id, name, email FROM travelers WHERE user_id = %s ORDER BY name", (user_id,)).fetchall()
-    return [{"id": str(row["id"]), "name": row["name"], "email": row["email"]} for row in rows]
+        rows = connection.execute("SELECT id, name, email, image_data FROM travelers WHERE user_id = %s ORDER BY name", (user_id,)).fetchall()
+    return [{"id": str(row["id"]), "name": row["name"], "email": row["email"], "image": row["image_data"]} for row in rows]
+
+
+def validated_traveler_image(value):
+    if value is None:
+        return None
+    match = re.fullmatch(r"data:image/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})", value)
+    if not match:
+        raise HTTPException(400, "Traveler photos must be PNG, JPEG, or WebP images.")
+    try:
+        image_bytes = base64.b64decode(match.group(1), validate=True)
+    except ValueError as error:
+        raise HTTPException(400, "The traveler photo is not valid base64 data.") from error
+    if not image_bytes or len(image_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Traveler photos must be between 1 byte and 5 MB.")
+    return value
 
 
 @app.post("/api/travelers", status_code=201)
@@ -583,6 +683,7 @@ def create_traveler(payload: TravelerInput, user_id: UserId):
         raise HTTPException(400, "Enter a traveler name.")
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(400, "Enter a valid traveler email address.")
+    image = validated_traveler_image(payload.image)
     try:
         with database() as connection:
             row = connection.execute(
@@ -592,19 +693,21 @@ def create_traveler(payload: TravelerInput, user_id: UserId):
             if row:
                 traveler_id = row["id"]
                 row = connection.execute(
-                    "UPDATE travelers SET email = %s WHERE id = %s RETURNING id, name, email",
-                    (email, traveler_id),
+                    """UPDATE travelers SET email = %s, image_data = COALESCE(%s, image_data)
+                       WHERE id = %s RETURNING id, name, email, image_data""",
+                    (email, image, traveler_id),
                 ).fetchone()
             else:
                 row = connection.execute(
-                    "INSERT INTO travelers (id, user_id, name, email) VALUES (%s, %s, %s, %s) RETURNING id, name, email",
-                    (uuid4(), user_id, name, email),
+                    """INSERT INTO travelers (id, user_id, name, email, image_data)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING id, name, email, image_data""",
+                    (uuid4(), user_id, name, email, image),
                 ).fetchone()
-    except sqlite3.IntegrityError as error:
-        if "travelers.user_id" not in str(error) and "UNIQUE constraint failed" not in str(error):
+    except pyodbc.IntegrityError as error:
+        if "travelers_user_name_unique" not in str(error) and "duplicate key" not in str(error).lower():
             raise
         raise HTTPException(409, "That traveler is already on your list.")
-    return {"id": str(row["id"]), "name": row["name"], "email": row["email"]}
+    return {"id": str(row["id"]), "name": row["name"], "email": row["email"], "image": row["image_data"]}
 
 
 @app.post("/api/travelers/{traveler_id}/send-summary")
@@ -676,16 +779,20 @@ def update_settings(payload: SettingsInput, user_id: UserId):
             if values[key] <= 0:
                 raise HTTPException(400, "Spending limits must be at least ₹0.01.")
     with database() as connection:
-        connection.execute(
-            """
-            INSERT INTO user_settings (user_id, expense_limit, travel_limit)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET
-              expense_limit = CASE WHEN %s THEN EXCLUDED.expense_limit ELSE user_settings.expense_limit END,
-              travel_limit = CASE WHEN %s THEN EXCLUDED.travel_limit ELSE user_settings.travel_limit END
-            """,
-            (user_id, values.get("expenseLimit"), values.get("travelLimit"), "expenseLimit" in values, "travelLimit" in values),
-        )
+        existing = connection.execute("SELECT user_id FROM user_settings WHERE user_id = %s", (user_id,)).fetchone()
+        if existing:
+            connection.execute(
+                """UPDATE user_settings SET
+                    expense_limit = CASE WHEN %s = 1 THEN %s ELSE expense_limit END,
+                    travel_limit = CASE WHEN %s = 1 THEN %s ELSE travel_limit END
+                    WHERE user_id = %s""",
+                ("expenseLimit" in values, values.get("expenseLimit"), "travelLimit" in values, values.get("travelLimit"), user_id),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO user_settings (user_id, expense_limit, travel_limit) VALUES (%s, %s, %s)",
+                (user_id, values.get("expenseLimit"), values.get("travelLimit")),
+            )
     return get_settings(user_id)
 
 

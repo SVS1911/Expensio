@@ -8,6 +8,7 @@
     "dev:client": "vite",
     "dev:api": "python -m uvicorn server.main:app --reload --port 8000",
     "migrate:json": "python scripts/import_json.py",
+    "migrate:sqlite": "python scripts/migrate_sqlite_to_sqlserver.py",
     "build": "vite build",
     "start": "python -m uvicorn server.main:app --host 0.0.0.0 --port 8000"
   },
