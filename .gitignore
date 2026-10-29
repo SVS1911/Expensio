@@ -1,13 +1,56 @@
+
+# ==============================
+# Node.js and React / Vite
+# ==============================
 node_modules/
 dist/
-.venv/
-__pycache__/
-.pytest_cache/
-.env
+.vite/
 npm-debug.log*
-.venv-1/
-*.db
-*.sqlite3
+yarn-debug.log*
+pnpm-debug.log*
+
+# ==============================
+# Python / FastAPI
+# ==============================
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+expensio/
+.venv-*/
+
+# ==============================
+# Environment variables / Secrets
+# ==============================
+.env
 .env.*
 !.env.example
+
+# ==============================
+# Local databases and backups
+# ==============================
+*.db
 *.sqlite
+*.sqlite3
+*.bak
+
+# ==============================
+# Logs
+# ==============================
+*.log
+
+# ==============================
+# IDE and operating system
+# ==============================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
