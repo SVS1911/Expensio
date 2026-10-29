@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from pwdlib import PasswordHash
 
-from server.main import create_schema, database
+from server.main import create_schema, database, ensure_database
 
 source_path = Path(__file__).resolve().parents[1] / "db.json"
 source_content = source_path.read_bytes()
@@ -14,13 +14,14 @@ source_hash = hashlib.sha256(source_content).hexdigest()
 hasher = PasswordHash.recommended()
 user_ids = {}
 
+ensure_database()
 create_schema()
 with database() as connection:
     connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS legacy_imports (
-            source_hash TEXT PRIMARY KEY,
-            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        IF OBJECT_ID(N'legacy_imports', N'U') IS NULL CREATE TABLE legacy_imports (
+            source_hash NVARCHAR(64) NOT NULL PRIMARY KEY,
+            imported_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
         )
         """
     )
@@ -60,13 +61,15 @@ with database() as connection:
         is_travel = legacy_expense.get("expenseType") == "travel"
         person = str(legacy_expense.get("people") or "").strip()[:100] if is_travel else None
         if is_travel and person:
-            connection.execute(
-                """
-                INSERT INTO travelers (id, user_id, name, email)
-                VALUES (%s, %s, %s, '') ON CONFLICT DO NOTHING
-                """,
-                (uuid4(), user_id, person),
-            )
+            existing_traveler = connection.execute(
+                "SELECT 1 FROM travelers WHERE user_id = %s AND name = %s",
+                (user_id, person),
+            ).fetchone()
+            if not existing_traveler:
+                connection.execute(
+                    "INSERT INTO travelers (id, user_id, name, email) VALUES (%s, %s, %s, '')",
+                    (uuid4(), user_id, person),
+                )
         connection.execute(
             """
             INSERT INTO expenses

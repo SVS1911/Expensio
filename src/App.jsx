@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { api, currentUser, jsonBody, logout, storeSession } from "./api.js";
 import ErrorMessage from "./components/ErrorMessage.jsx";
-import ThemeToggle from "./components/ThemeToggle.jsx";
 import {
   AuthPage,
   DashboardPage,
@@ -70,7 +69,6 @@ function App() {
 
   return (
     <>
-      <ThemeToggle />
       {sessionError && <ErrorMessage>{sessionError}</ErrorMessage>}
       {checkingSession ? <main className="session-loading" role="status">Checking your session…</main> : <Routes>
         <Route

@@ -6,10 +6,18 @@
     <meta name="theme-color" content="#fff8d6" />
     <script>
       (() => {
+        const palettes = ["previous", "ivory-charcoal", "beige-blue", "lime-orange", "bronze-pearl", "ruby-seafoam", "yellow-sage"];
         try {
-          const theme = localStorage.getItem("expenseTrackerTheme");
-          document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+          const stored = localStorage.getItem("expenseTrackerTheme") || "";
+          const [storedPalette, storedMode] = stored.split(":");
+          const palette = palettes.includes(storedPalette)
+            ? storedPalette
+            : palettes.includes(stored) ? stored : "previous";
+          const mode = storedPalette === "dark" || stored === "dark" || storedMode === "dark" ? "dark" : "light";
+          document.documentElement.dataset.palette = palette;
+          document.documentElement.dataset.theme = mode;
         } catch {
+          document.documentElement.dataset.palette = "previous";
           document.documentElement.dataset.theme = "light";
         }
       })();
